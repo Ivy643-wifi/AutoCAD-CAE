@@ -1,0 +1,52 @@
+# Cylindrical shell under internal pressure
+# 500 mm long, 50 mm radius, 3 mm wall
+
+metadata:
+  case_name: "Cylindrical Shell Internal Pressure"
+  source: "example"
+  status: "draft"
+
+topology: shell
+
+geometry:
+  geometry_type: cylindrical_shell
+  length: 500.0
+  width: 100.0      # diameter = 2*radius
+  thickness: 3.0
+  extra:
+    radius: 50.0
+    wall_thickness: 3.0
+
+materials:
+  - material_id: aluminium_7075
+    name: Aluminium_7075_T6
+    E: 71700.0    # MPa
+    nu: 0.33
+    rho: 2.81e-9  # kg/mm³
+
+features: []
+
+loads:
+  - load_type: pressure
+    magnitude: 1.0    # MPa (1 MPa internal pressure)
+    location:  INNER_SURFACE
+    direction: [1.0, 0.0, 0.0]
+
+boundary_conditions:
+  - bc_type: pinned
+    location: END_A
+  - bc_type: pinned
+    location: END_B
+
+analysis_type: pressure
+
+mesh_preferences:
+  global_size: 5.0
+  element_type: auto
+  min_quality: 0.3
+  optimize_passes: 3
+
+output_requests:
+  field_outputs: [U, S, E]
+  history_outputs: [U]
+  generate_plots: true

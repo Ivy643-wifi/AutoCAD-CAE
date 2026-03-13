@@ -1,0 +1,79 @@
+# Open Hole Tension (OHT) — standard ASTM D5766 coupon
+# 300 x 36 x 2 mm, 6 mm diameter central hole
+
+metadata:
+  case_name: "Open Hole Tension (OHT)"
+  source: "example"
+  status: "draft"
+
+topology: laminate
+
+geometry:
+  geometry_type: open_hole_plate
+  length: 300.0
+  width:  36.0
+  thickness: 2.0
+  extra:
+    hole_diameter: 6.0
+
+layup:
+  - angle:    0.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:  -45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   90.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   90.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:  -45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:    0.0
+    thickness: 0.25
+    material_id: carbon_ud
+
+materials:
+  - material_id: carbon_ud
+    name: Carbon_UD_T300_Epoxy
+    E1:   135000.0
+    E2:   10000.0
+    G12:  5200.0
+    nu12: 0.30
+    rho:  1.58e-9
+
+features: []
+
+loads:
+  - load_type: tension
+    magnitude: 8000.0
+    location:  LOAD_END
+    direction: [1.0, 0.0, 0.0]
+
+boundary_conditions:
+  - bc_type: fixed
+    location: FIXED_END
+
+analysis_type: static_tension
+
+mesh_preferences:
+  global_size: 2.0
+  local_refinements:
+    HOLE_SURFACE: 0.5   # finer mesh around hole
+  element_type: auto
+  min_quality: 0.3
+  optimize_passes: 3
+
+output_requests:
+  field_outputs: [U, S, E, RF]
+  history_outputs: [U, RF]
+  generate_plots: true

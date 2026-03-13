@@ -1,0 +1,76 @@
+# Flat plate uniaxial tension case
+# Corresponds to template: flat_plate_tension_v1
+# Standard ASTM coupon: 200 x 25 x 2 mm
+
+metadata:
+  case_name: "Flat Plate Uniaxial Tension"
+  source: "example"
+  status: "draft"
+
+topology: laminate
+
+geometry:
+  geometry_type: flat_plate
+  length: 200.0   # mm — loading direction (X)
+  width:  25.0    # mm
+  thickness: 2.0  # mm
+
+layup:
+  - angle:     0.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:    45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   -45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:    90.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:    90.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:   -45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:    45.0
+    thickness: 0.25
+    material_id: carbon_ud
+  - angle:     0.0
+    thickness: 0.25
+    material_id: carbon_ud
+
+materials:
+  - material_id: carbon_ud
+    name: Carbon_UD_T300_Epoxy
+    E1:   135000.0   # MPa  (fibre direction)
+    E2:   10000.0    # MPa  (transverse)
+    G12:  5200.0     # MPa
+    nu12: 0.30
+    rho:  1.58e-9    # kg/mm³  (1580 kg/m³)
+
+features: []
+
+loads:
+  - load_type: tension
+    magnitude: 10000.0   # N (total load applied to LOAD_END face)
+    location:  LOAD_END
+    direction: [1.0, 0.0, 0.0]
+
+boundary_conditions:
+  - bc_type: fixed
+    location: FIXED_END
+
+analysis_type: static_tension
+
+mesh_preferences:
+  global_size: 2.0    # mm
+  element_type: auto
+  min_quality: 0.3
+  optimize_passes: 3
+
+output_requests:
+  field_outputs: [U, S, E, RF]
+  history_outputs: [U, RF]
+  generate_plots: true

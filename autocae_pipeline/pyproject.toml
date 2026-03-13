@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "autocae-pipeline"
+version = "0.1.0"
+description = "Automated CAD/CAE Pipeline - Phase 1 MVP"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "matplotlib>=3.7",
+    "cadquery>=2.4",
+    "gmsh>=4.11",
+    "pyvista>=0.43",
+    "rich>=13.0",
+    "loguru>=0.7",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+
+[project.scripts]
+autocae = "autocae.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "N", "UP", "ANN"]
+ignore = ["ANN101", "ANN102"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

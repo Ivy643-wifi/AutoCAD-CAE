@@ -1,0 +1,67 @@
+# Flat plate linear buckling analysis
+# 200 x 100 x 2 mm quasi-isotropic laminate
+
+metadata:
+  case_name: "Flat Plate Linear Buckling"
+  source: "example"
+  status: "draft"
+
+topology: laminate
+
+geometry:
+  geometry_type: flat_plate
+  length: 200.0
+  width:  100.0
+  thickness: 2.0
+
+layup:
+  - angle:    0.0
+    thickness: 0.5
+    material_id: carbon_ud
+  - angle:   90.0
+    thickness: 0.5
+    material_id: carbon_ud
+  - angle:   90.0
+    thickness: 0.5
+    material_id: carbon_ud
+  - angle:    0.0
+    thickness: 0.5
+    material_id: carbon_ud
+
+materials:
+  - material_id: carbon_ud
+    name: Carbon_UD_T300_Epoxy
+    E1:   135000.0
+    E2:   10000.0
+    G12:  5200.0
+    nu12: 0.30
+    rho:  1.58e-9
+
+features: []
+
+loads:
+  - load_type: compression
+    magnitude: -1.0     # unit load for buckling (eigenvalue scales it)
+    location:  LOAD_END
+    direction: [1.0, 0.0, 0.0]
+
+boundary_conditions:
+  - bc_type: fixed
+    location: FIXED_END
+  - bc_type: simply_supported
+    location: TOP_FACE
+  - bc_type: simply_supported
+    location: BOTTOM_FACE
+
+analysis_type: buckling
+
+mesh_preferences:
+  global_size: 5.0
+  element_type: auto
+  min_quality: 0.3
+  optimize_passes: 3
+
+output_requests:
+  field_outputs: [U, S]
+  history_outputs: []
+  generate_plots: true

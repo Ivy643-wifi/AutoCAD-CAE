@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import setuptools; print\\(setuptools.__version__\\)\")",
+      "Bash(python -c \"from setuptools.backends.legacy import BuildBackend; print\\(''OK''\\)\")",
+      "Bash(PYTHONPATH=src python -c \"from autocae.schemas.case_spec import CaseSpec; print\\(''schemas OK''\\)\")",
+      "Bash(PYTHONPATH=src python -c \"from autocae.case_spec.builder import CaseSpecBuilder; b = CaseSpecBuilder\\(\\); s = b.from_yaml\\(''examples/flat_plate_tension.yaml''\\); print\\(''case_id:'', s.metadata.case_id\\); print\\(''geo:'', s.geometry.geometry_type\\)\")",
+      "Bash(ls -la /d/desktop/AutoCAD/autocae_pipeline/*.md /d/desktop/AutoCAD/autocae_pipeline/docs/)",
+      "Bash(pip show:*)"
+    ]
+  }
+}
