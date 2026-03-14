@@ -22,7 +22,7 @@ class TestPipelineDryRun:
         self.runs_dir = tmp_path / "runs"
 
     def _run(self, yaml_name: str):
-        from autocae.pipeline.runner import PipelineRunner
+        from autocae.backend.orchestrator.pipeline import PipelineRunner
         runner = PipelineRunner(runs_dir=self.runs_dir, dry_run=True)
         return runner.run_from_yaml(EXAMPLES_DIR / yaml_name)
 

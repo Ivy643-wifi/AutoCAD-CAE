@@ -86,6 +86,9 @@ class ResultSummary(BaseModel):
     # 模态频率
     natural_frequencies: list[float] | None = None  # 前 N 阶固有频率 [Hz]
 
+    # 载荷-位移曲线（每个点 [total_load_N, max_disp_mm]，按步号排序）
+    load_displacement_curve: list[list[float]] | None = None
+
     # 额外自定义标量
     extra_scalars: list[ScalarResult] = Field(default_factory=list)
 

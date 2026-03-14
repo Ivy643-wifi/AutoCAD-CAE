@@ -21,7 +21,7 @@ from autocae.schemas.analysis_model import (
     TemplateLinkage,
 )
 from autocae.schemas.mesh import MeshGroup, MeshGroups
-from autocae.solver.calculix import CalculiXAdapter
+from autocae.backend.services.solver_service import CalculiXAdapter
 
 
 def make_simple_analysis_model() -> AnalysisModel:

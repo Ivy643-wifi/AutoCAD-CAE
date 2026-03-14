@@ -22,7 +22,7 @@ from autocae.schemas.case_spec import (
     MeshPreferences,
     Topology,
 )
-from autocae.case_spec.validator import CaseSpecValidator
+from autocae.backend.input.validator import CaseSpecValidator
 
 
 # ---------------------------------------------------------------------------

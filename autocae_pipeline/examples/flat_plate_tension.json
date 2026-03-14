@@ -1,0 +1,67 @@
+{
+  "metadata": {
+    "case_name": "Flat Plate Uniaxial Tension (JSON)",
+    "source": "example",
+    "status": "draft",
+    "notes": "Standard ASTM coupon: 200 x 25 x 2 mm, [0/45/-45/90]s carbon/epoxy"
+  },
+  "topology": "laminate",
+  "geometry": {
+    "geometry_type": "flat_plate",
+    "length": 200.0,
+    "width": 25.0,
+    "thickness": 2.0,
+    "extra": {}
+  },
+  "layup": [
+    { "angle":   0.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle":  45.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle": -45.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle":  90.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle":  90.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle": -45.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle":  45.0, "thickness": 0.25, "material_id": "carbon_ud" },
+    { "angle":   0.0, "thickness": 0.25, "material_id": "carbon_ud" }
+  ],
+  "materials": [
+    {
+      "material_id": "carbon_ud",
+      "name": "Carbon_UD_T300_Epoxy",
+      "E1":   135000.0,
+      "E2":   10000.0,
+      "G12":  5200.0,
+      "nu12": 0.30,
+      "rho":  1.58e-9
+    }
+  ],
+  "features": [],
+  "loads": [
+    {
+      "load_type": "tension",
+      "magnitude": 10000.0,
+      "location": "LOAD_END",
+      "direction": [1.0, 0.0, 0.0]
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "bc_type": "fixed",
+      "location": "FIXED_END",
+      "constrained_dofs": []
+    }
+  ],
+  "analysis_type": "static_tension",
+  "mesh_preferences": {
+    "global_size": 2.0,
+    "element_type": "auto",
+    "min_quality": 0.3,
+    "optimize_passes": 3,
+    "local_refinements": {}
+  },
+  "output_requests": {
+    "field_outputs": ["U", "S", "E", "RF"],
+    "history_outputs": ["U", "RF"],
+    "generate_plots": true,
+    "generate_report": false
+  }
+}

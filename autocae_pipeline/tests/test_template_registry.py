@@ -21,7 +21,7 @@ from autocae.schemas.case_spec import (
     MeshPreferences,
     Topology,
 )
-from autocae.template_library.registry import TemplateRegistry
+from autocae.backend.templates.registry import TemplateRegistry
 
 
 def make_flat_plate_tension_spec() -> CaseSpec:

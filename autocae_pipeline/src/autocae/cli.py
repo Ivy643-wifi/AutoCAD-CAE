@@ -32,9 +32,9 @@ from rich import print as rprint
 from rich.table import Table
 
 # 流水线主控类
-from autocae.pipeline.runner import PipelineRunner
+from autocae.backend.orchestrator.pipeline import PipelineRunner
 # 模板注册表（list-templates 命令使用）
-from autocae.template_library.registry import TemplateRegistry
+from autocae.backend.templates.registry import TemplateRegistry
 
 # 创建 Typer 应用实例（add_completion=False 禁用 shell 自动补全安装提示）
 app = typer.Typer(
@@ -160,10 +160,10 @@ def validate(
         打印红色 ✗ 错误列表，以退出码 1 退出
     """
     # 延迟导入，避免每次 CLI 启动时都加载所有模块
-    from autocae.case_spec.builder import CaseSpecBuilder
-    from autocae.case_spec.validator import CaseSpecValidator
+    from autocae.backend.input.loader import CaseSpecLoader
+    from autocae.backend.input.validator import CaseSpecValidator
 
-    builder = CaseSpecBuilder()
+    builder = CaseSpecLoader()
     validator = CaseSpecValidator()
 
     try:
@@ -190,6 +190,184 @@ def validate(
     except Exception as exc:
         # 文件读取失败或 Pydantic 解析失败（格式错误）
         rprint(f"[red]Error loading case file:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def solve(
+    run_dir: Path = typer.Argument(
+        ...,
+        help="已有的 run 目录路径（runs/<case_id>/），其中须包含 solver_job.json 和 analysis_model.json",
+    ),
+    ccx_path: Optional[str] = typer.Option(
+        None,
+        "--ccx-path",
+        help="CalculiX 可执行文件路径（默认：CCX_PATH 环境变量，或 PATH 中的 ccx）",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """对已有 run 目录执行 CalculiX 求解并运行后处理（Stage 6 + 7）。
+
+    适用场景：
+
+    \\b
+        # 对 dry-run 生成的目录执行真实求解
+        autocae solve runs/case_3800d1c7/
+
+    \\b
+        # 指定 CalculiX 可执行文件路径
+        autocae solve runs/case_3800d1c7/ --ccx-path /opt/ccx/bin/ccx
+
+    若目录中已存在 run_status.json 且状态为 COMPLETED，则跳过求解直接运行后处理。
+    """
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    runner = PipelineRunner(ccx_executable=ccx_path)
+    result = runner.solve_from_run_dir(run_dir)
+
+    if result.success:
+        rprint(f"\n[bold green]✓ Solve completed[/bold green] → {result.run_dir}")
+        if result.result_summary:
+            s = result.result_summary
+            table = Table(title="Result Summary", show_header=True)
+            table.add_column("Metric")
+            table.add_column("Value")
+            table.add_column("Unit")
+            if s.max_displacement is not None:
+                table.add_row("Max Displacement", f"{s.max_displacement:.4e}", "mm")
+            if s.max_mises_stress is not None:
+                table.add_row("Max Mises Stress", f"{s.max_mises_stress:.4e}", "MPa")
+            if s.buckling_load_factor is not None:
+                table.add_row("Buckling Load Factor", f"{s.buckling_load_factor:.4f}", "—")
+            if s.natural_frequencies:
+                table.add_row(
+                    "Natural Freq (1st)", f"{s.natural_frequencies[0]:.4e}", "Hz"
+                )
+            rprint(table)
+    else:
+        rprint(f"\n[bold red]✗ Solve failed:[/bold red] {result.error_message}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def visualize(
+    target: Path = typer.Argument(
+        ...,
+        help="运行目录（runs/<case_id>/）或单个 .step / .inp 文件",
+    ),
+    mode: str = typer.Option(
+        "auto",
+        "--mode", "-m",
+        help="可视化模式：auto（自动检测）| cad（仅 CAD）| mesh（仅网格）| results（仅 CalculiX 结果场）",
+    ),
+    no_interactive: bool = typer.Option(
+        False,
+        "--no-interactive",
+        help="关闭交互窗口（仅保存 PNG，适合无显示器环境）",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="不保存 PNG 截图",
+    ),
+    groups_json: Optional[Path] = typer.Option(
+        None,
+        "--groups",
+        help="mesh_groups.json 路径（mode=mesh 时使用，默认从同目录自动查找）",
+    ),
+) -> None:
+    """可视化 CAD 几何（STEP）、有限元网格（mesh.inp）和 CalculiX 结果场（job.frd）。
+
+    用法示例：
+
+    \\b
+        # 可视化整个运行目录（CAD + 网格 + 位移/应力结果场，交互模式）
+        autocae visualize runs/case_001/
+
+    \\b
+        # 仅可视化 CAD 几何，保存 PNG 后退出
+        autocae visualize runs/case_001/model.step --mode cad --no-interactive
+
+    \\b
+        # 仅可视化网格，无显示器模式
+        autocae visualize runs/case_001/mesh.inp --mode mesh --no-interactive
+
+    \\b
+        # CI 批处理：关闭交互窗口，只保存截图（含 CAD + 网格 + 结果场共 4 张 PNG）
+        autocae visualize runs/case_001/ --no-interactive
+    """
+    from autocae.backend.services.visualization_service import VisualizationService
+
+    svc = VisualizationService()
+    interactive = not no_interactive
+    save_png = not no_save
+    target = Path(target)
+
+    try:
+        # ── 自动检测：单文件 vs 目录 ──────────────────────────────────────
+        if target.is_dir():
+            rprint(f"[bold cyan]Visualizing run directory:[/bold cyan] {target}")
+            results = svc.visualize_run(
+                run_dir=target,
+                interactive=interactive,
+                save_png=save_png,
+            )
+            for key, png in results.items():
+                if png:
+                    rprint(f"  [green]✓[/green] {key} screenshot → {png}")
+
+        elif target.suffix.lower() in (".step", ".stp") or mode == "cad":
+            # 单 STEP 文件
+            step_file = target
+            output_dir = target.parent if save_png else None
+            # 尝试从同目录读取 geometry_meta.json 获取 bounding_box
+            bbox: dict = {}
+            meta_path = target.parent / "geometry_meta.json"
+            if meta_path.exists():
+                import json
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                bbox = meta.get("bounding_box") or {}
+            rprint(f"[bold cyan]Visualizing CAD geometry:[/bold cyan] {step_file}")
+            png = svc.visualize_cad(
+                step_file=step_file,
+                bounding_box=bbox,
+                output_dir=output_dir,
+                interactive=interactive,
+                save_png=save_png,
+            )
+            if png:
+                rprint(f"  [green]✓[/green] Screenshot saved → {png}")
+
+        elif target.suffix.lower() == ".inp" or mode == "mesh":
+            # 单 INP 文件
+            mesh_file = target
+            output_dir = target.parent if save_png else None
+            # 自动查找 mesh_groups.json
+            resolved_groups = groups_json or (
+                target.parent / "mesh_groups.json"
+                if (target.parent / "mesh_groups.json").exists()
+                else None
+            )
+            rprint(f"[bold cyan]Visualizing FE mesh:[/bold cyan] {mesh_file}")
+            png = svc.visualize_mesh(
+                mesh_inp_file=mesh_file,
+                groups_json=resolved_groups,
+                output_dir=output_dir,
+                interactive=interactive,
+                save_png=save_png,
+            )
+            if png:
+                rprint(f"  [green]✓[/green] Screenshot saved → {png}")
+
+        else:
+            rprint(f"[red]Cannot determine visualization mode for:[/red] {target}")
+            rprint("  Use --mode cad | mesh, or pass a run directory / .step / .inp file.")
+            raise typer.Exit(code=1)
+
+    except Exception as exc:
+        rprint(f"[bold red]Visualization error:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
 
