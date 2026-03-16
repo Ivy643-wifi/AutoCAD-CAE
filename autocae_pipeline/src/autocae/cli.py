@@ -1,6 +1,7 @@
 """AutoCAE 命令行界面（CLI）— 流水线的用户入口。
 
-提供三个子命令：
+提供子命令：
+    autocae intake [--text/--step-file] — V3 检索优先入口（输出 CaseSpec + intake_decision）
     autocae run <case_file>         — 运行完整流水线
     autocae validate <case_file>    — 仅校验 CaseSpec，不运行求解器
     autocae list-templates          — 列出所有已注册的 Phase 1 模板
@@ -24,7 +25,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, cast
 
 import typer
 from loguru import logger
@@ -33,6 +34,9 @@ from rich.table import Table
 
 # 流水线主控类
 from autocae.backend.orchestrator.pipeline import PipelineRunner
+from autocae.backend.intake.service import IntakeService
+from autocae.backend.review.cad_gate import CadGateService
+from autocae.backend.review.mesh_gate import MeshGateService
 # 模板注册表（list-templates 命令使用）
 from autocae.backend.templates.registry import TemplateRegistry
 
@@ -42,6 +46,223 @@ app = typer.Typer(
     help="AutoCAE Pipeline — Automated CAD/CAE Analysis System (Phase 1 MVP)",
     add_completion=False,
 )
+preview_app = typer.Typer(help="Stage review gate commands.")
+app.add_typer(preview_app, name="preview")
+
+
+@app.command()
+def intake(
+    text: Optional[str] = typer.Option(
+        None,
+        "--text",
+        help="自然语言输入（例如：flat plate tension length=200 width=25 thickness=2）",
+    ),
+    step_file: Optional[Path] = typer.Option(
+        None,
+        "--step-file",
+        help="STEP 文件输入路径（支持 .step/.stp）",
+    ),
+    image_file: Optional[Path] = typer.Option(
+        None,
+        "--image-file",
+        help="图片输入接口预留（当前仅记录输入，不做图像语义解析）",
+    ),
+    runs_dir: Path = typer.Option(Path("runs"), help="Intake 输出根目录（默认 ./runs）"),
+    project_case_library: Path = typer.Option(
+        Path("project_case_library"),
+        "--project-case-library",
+        help="Project Case Library 根目录（用于检索历史 case_spec.json）",
+    ),
+    min_reuse_confidence: float = typer.Option(
+        0.75,
+        "--min-reuse-confidence",
+        min=0.0,
+        max=1.0,
+        help="复用阈值（>= 阈值走 reuse，否则走 generate）",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """V3 Intake：先检索（Template/Project Case），再决定复用或生成。
+
+    输出：
+        runs/<case_id>/case_spec.json
+        runs/<case_id>/intake_decision.json
+    """
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    svc = IntakeService()
+
+    try:
+        outcome = svc.intake(
+            text=text,
+            step_file=step_file,
+            image_file=image_file,
+            runs_dir=runs_dir,
+            project_case_library=project_case_library,
+            min_reuse_confidence=min_reuse_confidence,
+        )
+    except Exception as exc:
+        rprint(f"[bold red]Intake failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    rprint(f"\n[bold green]Intake completed[/bold green] -> {outcome.run_dir}")
+    rprint(
+        f"  route: [cyan]{outcome.decision.get('final_path')}[/cyan] | "
+        f"case_id: [cyan]{outcome.case_spec.metadata.case_id}[/cyan]"
+    )
+    rprint(f"  case_spec: {outcome.case_spec_path}")
+    rprint(f"  intake_decision: {outcome.intake_decision_path}")
+    if image_file is not None:
+        rprint(
+            "  [yellow]note:[/yellow] image intake parser is reserved; "
+            "current version only records image metadata in intake_decision.json."
+        )
+
+
+def _resolve_gate_decision(decision: Optional[str]) -> Literal["confirm", "edit", "abort"]:
+    valid = {"confirm", "edit", "abort"}
+    if decision is not None:
+        norm = decision.strip().lower()
+        if norm in valid:
+            return cast(Literal["confirm", "edit", "abort"], norm)
+        raise ValueError("Invalid decision. Expected one of: confirm, edit, abort.")
+
+    while True:
+        raw = typer.prompt("CAD decision [confirm/edit/abort]", default="confirm")
+        norm = raw.strip().lower()
+        if norm in valid:
+            return cast(Literal["confirm", "edit", "abort"], norm)
+        rprint("[yellow]Invalid decision, please enter confirm/edit/abort.[/yellow]")
+
+
+@preview_app.command("cad")
+def preview_cad(
+    run_dir: Path = typer.Argument(
+        ...,
+        help="run 目录路径（支持根目录结构或 02_cad 子目录结构）",
+    ),
+    decision: Optional[str] = typer.Option(
+        None,
+        "--decision",
+        help="用户决策：confirm|edit|abort（不传则交互询问）",
+    ),
+    comment: str = typer.Option("", "--comment", help="用户备注（可选）"),
+    edit_request: str = typer.Option("", "--edit-request", help="edit 时的修改请求（可选）"),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="打开交互预览窗口（默认仅离屏生成 PNG）",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """执行 CAD Gate：auto_check -> preview -> user_confirm -> review_transcript."""
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    try:
+        resolved_decision = _resolve_gate_decision(decision)
+    except Exception as exc:
+        rprint(f"[bold red]CAD gate failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    gate = CadGateService()
+    try:
+        outcome = gate.run_gate(
+            run_dir=run_dir,
+            decision=resolved_decision,
+            comment=comment,
+            edit_request=edit_request,
+            interactive_preview=interactive,
+        )
+    except Exception as exc:
+        rprint(f"[bold red]CAD gate failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    table = Table(title="CAD Gate Checks", show_header=True)
+    table.add_column("Check")
+    table.add_column("Passed")
+    table.add_column("Message")
+    for check in outcome.checks:
+        table.add_row(
+            check.get("name", ""),
+            "yes" if bool(check.get("passed")) else "no",
+            check.get("message", ""),
+        )
+
+    rprint(table)
+    rprint(f"decision: [cyan]{outcome.decision}[/cyan]")
+    rprint(f"next_stage_allowed: [cyan]{outcome.next_stage_allowed}[/cyan]")
+    if outcome.preview_png:
+        rprint(f"preview_png: {outcome.preview_png}")
+    if outcome.transcript_path:
+        rprint(f"review_transcript: {outcome.transcript_path}")
+
+
+@preview_app.command("mesh")
+def preview_mesh(
+    run_dir: Path = typer.Argument(
+        ...,
+        help="run 目录路径（支持根目录结构或 03_mesh 子目录结构）",
+    ),
+    decision: Optional[str] = typer.Option(
+        None,
+        "--decision",
+        help="用户决策：confirm|edit|abort（不传则交互询问）",
+    ),
+    comment: str = typer.Option("", "--comment", help="用户备注（可选）"),
+    edit_request: str = typer.Option("", "--edit-request", help="edit 时的修改请求（可选）"),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="打开交互预览窗口（默认仅离屏生成 PNG）",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """执行 Mesh Gate：auto_check -> preview -> user_confirm -> review_transcript."""
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    try:
+        resolved_decision = _resolve_gate_decision(decision)
+    except Exception as exc:
+        rprint(f"[bold red]Mesh gate failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    gate = MeshGateService()
+    try:
+        outcome = gate.run_gate(
+            run_dir=run_dir,
+            decision=resolved_decision,
+            comment=comment,
+            edit_request=edit_request,
+            interactive_preview=interactive,
+        )
+    except Exception as exc:
+        rprint(f"[bold red]Mesh gate failed:[/bold red] {exc}")
+        raise typer.Exit(code=1)
+
+    table = Table(title="Mesh Gate Checks", show_header=True)
+    table.add_column("Check")
+    table.add_column("Passed")
+    table.add_column("Message")
+    for check in outcome.checks:
+        table.add_row(
+            check.get("name", ""),
+            "yes" if bool(check.get("passed")) else "no",
+            check.get("message", ""),
+        )
+
+    rprint(table)
+    rprint(f"decision: [cyan]{outcome.decision}[/cyan]")
+    rprint(f"next_stage_allowed: [cyan]{outcome.next_stage_allowed}[/cyan]")
+    if outcome.preview_png:
+        rprint(f"preview_png: {outcome.preview_png}")
+    if outcome.transcript_path:
+        rprint(f"review_transcript: {outcome.transcript_path}")
 
 
 @app.command()
@@ -55,6 +276,28 @@ def run(
         "--step-file",
         help="External STEP file path. When provided, skips CAD generation (Stage 2) "
              "and uses this STEP file directly (G-02 dual-track).",
+    ),
+    cad_mode: str = typer.Option(
+        "template",
+        "--cad-mode",
+        help="CAD stage mode: template | llm (LLM generation + bounded auto-repair).",
+    ),
+    cad_llm_max_attempts: int = typer.Option(
+        3,
+        "--cad-llm-max-attempts",
+        min=1,
+        help="Bounded retry max_attempts for CAD LLM generation/repair.",
+    ),
+    mesh_mode: str = typer.Option(
+        "template",
+        "--mesh-mode",
+        help="Mesh stage mode: template | llm (LLM generation + bounded auto-repair).",
+    ),
+    mesh_llm_max_attempts: int = typer.Option(
+        3,
+        "--mesh-llm-max-attempts",
+        min=1,
+        help="Bounded retry max_attempts for Mesh LLM generation/repair.",
     ),
 ) -> None:
     """运行完整的 AutoCAE 流水线（8 个阶段）。
@@ -78,7 +321,14 @@ def run(
         logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
 
     # 初始化流水线（dry_run 控制是否跳过 CCX 执行）
-    runner = PipelineRunner(runs_dir=runs_dir, dry_run=dry_run)
+    runner = PipelineRunner(
+        runs_dir=runs_dir,
+        dry_run=dry_run,
+        cad_mode=cad_mode,
+        cad_llm_max_attempts=cad_llm_max_attempts,
+        mesh_mode=mesh_mode,
+        mesh_llm_max_attempts=mesh_llm_max_attempts,
+    )
 
     # 根据是否提供外部 STEP 文件，选择对应入口方法
     if step_file is not None:
@@ -93,7 +343,7 @@ def run(
 
     if result.success:
         # 成功 → 打印结果目录路径 + 关键结果表格
-        rprint(f"\n[bold green]✓ Pipeline completed[/bold green] → {result.run_dir}")
+        rprint(f"\n[bold green]Pipeline completed[/bold green] -> {result.run_dir}")
         if result.result_summary:
             s = result.result_summary
             # 用 Rich Table 展示关键标量结果
@@ -110,7 +360,7 @@ def run(
             rprint(table)
     else:
         # 失败 → 打印错误信息，以退出码 1 退出（供 CI/CD 脚本检测）
-        rprint(f"\n[bold red]✗ Pipeline failed:[/bold red] {result.error_message}")
+        rprint(f"\n[bold red]Pipeline failed:[/bold red] {result.error_message}")
         raise typer.Exit(code=1)
 
 
@@ -175,16 +425,16 @@ def validate(
         val_result = validator.validate(spec)
 
         if val_result.passed:
-            rprint(f"[green]✓ Validation passed[/green] for '{spec.metadata.case_name}'")
+            rprint(f"[green]Validation passed[/green] for '{spec.metadata.case_name}'")
             # 即使通过，也显示警告信息（如参数超出推荐范围等）
             if val_result.warnings:
                 for w in val_result.warnings:
-                    rprint(f"  [yellow]⚠ {w}[/yellow]")
+                    rprint(f"  [yellow]warning: {w}[/yellow]")
         else:
-            rprint(f"[red]✗ Validation failed[/red]")
+            rprint(f"[red]Validation failed[/red]")
             # 逐行打印所有错误信息（如拓扑/几何类型不匹配等）
             for e in val_result.errors:
-                rprint(f"  [red]• {e}[/red]")
+                rprint(f"  [red]- {e}[/red]")
             raise typer.Exit(code=1)
 
     except Exception as exc:
@@ -205,6 +455,11 @@ def solve(
         help="CalculiX 可执行文件路径（默认：CCX_PATH 环境变量，或 PATH 中的 ccx）",
     ),
     verbose: bool = typer.Option(False, help="Enable verbose logging"),
+    enforce_mesh_gate: bool = typer.Option(
+        True,
+        "--enforce-mesh-gate/--no-enforce-mesh-gate",
+        help="是否在求解前强制检查 Mesh Gate 已通过（V3 默认开启）",
+    ),
 ) -> None:
     """对已有 run 目录执行 CalculiX 求解并运行后处理（Stage 6 + 7）。
 
@@ -225,10 +480,10 @@ def solve(
         logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
 
     runner = PipelineRunner(ccx_executable=ccx_path)
-    result = runner.solve_from_run_dir(run_dir)
+    result = runner.solve_from_run_dir(run_dir, enforce_mesh_gate=enforce_mesh_gate)
 
     if result.success:
-        rprint(f"\n[bold green]✓ Solve completed[/bold green] → {result.run_dir}")
+        rprint(f"\n[bold green]Solve completed[/bold green] -> {result.run_dir}")
         if result.result_summary:
             s = result.result_summary
             table = Table(title="Result Summary", show_header=True)
@@ -247,7 +502,7 @@ def solve(
                 )
             rprint(table)
     else:
-        rprint(f"\n[bold red]✗ Solve failed:[/bold red] {result.error_message}")
+        rprint(f"\n[bold red]Solve failed:[/bold red] {result.error_message}")
         raise typer.Exit(code=1)
 
 
@@ -316,7 +571,7 @@ def visualize(
             )
             for key, png in results.items():
                 if png:
-                    rprint(f"  [green]✓[/green] {key} screenshot → {png}")
+                    rprint(f"  [green]ok[/green] {key} screenshot -> {png}")
 
         elif target.suffix.lower() in (".step", ".stp") or mode == "cad":
             # 单 STEP 文件
@@ -338,7 +593,7 @@ def visualize(
                 save_png=save_png,
             )
             if png:
-                rprint(f"  [green]✓[/green] Screenshot saved → {png}")
+                rprint(f"  [green]ok[/green] Screenshot saved -> {png}")
 
         elif target.suffix.lower() == ".inp" or mode == "mesh":
             # 单 INP 文件
@@ -359,7 +614,7 @@ def visualize(
                 save_png=save_png,
             )
             if png:
-                rprint(f"  [green]✓[/green] Screenshot saved → {png}")
+                rprint(f"  [green]ok[/green] Screenshot saved -> {png}")
 
         else:
             rprint(f"[red]Cannot determine visualization mode for:[/red] {target}")

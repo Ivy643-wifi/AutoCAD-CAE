@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -89,6 +90,7 @@ class MeshService:
             output_dir.mkdir(parents=True, exist_ok=True)
             gmsh.write(mesh_path)
             logger.info(f"  Mesh exported → {mesh_path}")
+            self._sanitize_mesh_for_calculix(Path(mesh_path))
 
             quality_report = self._compute_quality_report(geo_id, mesh_path, prefs.min_quality)
 
@@ -209,6 +211,78 @@ class MeshService:
             gmsh.model.mesh.setOrder(2)
         else:
             gmsh.model.mesh.setOrder(1)
+
+    def _sanitize_mesh_for_calculix(self, mesh_path: Path) -> None:
+        """Keep only C3D element blocks when a mixed-dimension mesh is exported.
+
+        Gmsh can export both surface elements (e.g. CPS3) and volume elements
+        (e.g. C3D4) into one mesh.inp. For solid analyses in CalculiX, keeping
+        planar elements in 3D coordinates may trigger gen3delem errors.
+        """
+        if not mesh_path.exists():
+            return
+
+        lines = mesh_path.read_text(encoding="latin-1", errors="replace").splitlines(
+            keepends=True
+        )
+
+        has_3d_block = False
+        for line in lines:
+            if not line.lstrip().upper().startswith("*ELEMENT"):
+                continue
+            if self._extract_element_type(line).startswith("C3D"):
+                has_3d_block = True
+                break
+        if not has_3d_block:
+            return
+
+        backup_path = mesh_path.with_suffix(".inp.bak")
+        if not backup_path.exists():
+            shutil.copy2(mesh_path, backup_path)
+
+        filtered: list[str] = []
+        i = 0
+        removed_blocks = 0
+        removed_elements = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.lstrip().upper().startswith("*ELEMENT"):
+                etype = self._extract_element_type(line)
+                j = i + 1
+                elem_count = 0
+                while j < len(lines) and not lines[j].lstrip().startswith("*"):
+                    if lines[j].strip():
+                        elem_count += 1
+                    j += 1
+
+                if etype.startswith("C3D"):
+                    filtered.extend(lines[i:j])
+                else:
+                    removed_blocks += 1
+                    removed_elements += elem_count
+
+                i = j
+                continue
+
+            filtered.append(line)
+            i += 1
+
+        if removed_blocks > 0:
+            mesh_path.write_text("".join(filtered), encoding="latin-1")
+            logger.info(
+                "  Sanitized mesh.inp for CalculiX: removed "
+                f"{removed_elements} elements from {removed_blocks} non-3D blocks; "
+                f"backup -> {backup_path.name}"
+            )
+
+    @staticmethod
+    def _extract_element_type(header_line: str) -> str:
+        """Parse *ELEMENT header and return TYPE in upper-case."""
+        for part in header_line.split(","):
+            p = part.strip()
+            if p.upper().startswith("TYPE="):
+                return p.split("=", 1)[1].strip().upper()
+        return ""
 
     def _compute_quality_report(
         self, geo_id: str, mesh_file: str, min_quality_threshold: float

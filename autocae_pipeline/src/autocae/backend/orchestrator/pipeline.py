@@ -1,16 +1,14 @@
-"""Pipeline orchestrator — 协调完整的 8 阶段 AutoCAE 流水线。
+﻿"""Pipeline orchestrator 鈥?鍗忚皟瀹屾暣鐨?8 闃舵 AutoCAE 娴佹按绾裤€?
+Stage 0: Validate       鈫?CaseSpecValidator
+Stage 1: TemplateMatch  鈫?TemplateRegistry
+Stage 2: CAD            鈫?CADService (CadQuery or external STEP)
+Stage 3: Mesh           鈫?MeshService (Gmsh)
+Stage 4: AnalysisModel  鈫?TemplateInstantiator
+Stage 5: SolverInput    鈫?CalculiXAdapter
+Stage 6: SolverRun      鈫?SolverRunner (or dry_run)
+Stage 7: Postprocess    鈫?PostprocessEngine
 
-Stage 0: Validate       → CaseSpecValidator
-Stage 1: TemplateMatch  → TemplateRegistry
-Stage 2: CAD            → CADService (CadQuery or external STEP)
-Stage 3: Mesh           → MeshService (Gmsh)
-Stage 4: AnalysisModel  → TemplateInstantiator
-Stage 5: SolverInput    → CalculiXAdapter
-Stage 6: SolverRun      → SolverRunner (or dry_run)
-Stage 7: Postprocess    → PostprocessEngine
-
-G-11（文件接口驱动）：每阶段通过 runs/<case_id>/ 目录内的文件交换数据。
-"""
+G-11锛堟枃浠舵帴鍙ｉ┍鍔級锛氭瘡闃舵閫氳繃 runs/<case_id>/ 鐩綍鍐呯殑鏂囦欢浜ゆ崲鏁版嵁銆?"""
 
 from __future__ import annotations
 
@@ -23,9 +21,21 @@ from loguru import logger
 from autocae.backend.input.loader import CaseSpecLoader
 from autocae.backend.input.validator import CaseSpecValidator
 from autocae.backend.services.cad_service import CADService
+from autocae.backend.services.cad_llm_service import (
+    CadLLMBuildService,
+    CadLLMRepairConfig,
+)
+from autocae.backend.services.mesh_llm_service import (
+    MeshLLMBuildService,
+    MeshLLMRepairConfig,
+)
 from autocae.backend.services.mesh_service import MeshService
 from autocae.backend.services.solver_service import CalculiXAdapter, SolverRunner
 from autocae.backend.services.postprocess_service import PostprocessEngine
+from autocae.backend.review.gate_guard import (
+    ensure_cad_gate_passed,
+    ensure_mesh_gate_passed,
+)
 from autocae.backend.templates.registry import TemplateRegistry
 from autocae.backend.templates.instantiator import TemplateInstantiator
 from autocae.schemas.analysis_model import AnalysisModel
@@ -37,7 +47,7 @@ from autocae.schemas.solver import RunStatus, RunStatusEnum, SolverJob
 
 @dataclass
 class PipelineResult:
-    """一次流水线运行的完整输出容器。"""
+    """Container for one pipeline run result."""
     case_id: str
     run_dir: Path
     success: bool = False
@@ -53,15 +63,13 @@ class PipelineResult:
 
 
 class PipelineRunner:
-    """主控类：协调 Phase 1 AutoCAE 完整流水线。
-
+    """涓绘帶绫伙細鍗忚皟 Phase 1 AutoCAE 瀹屾暣娴佹按绾裤€?
     Usage::
 
         runner = PipelineRunner(runs_dir=Path("runs"))
         result = runner.run_from_yaml("examples/flat_plate_tension.yaml")
 
-    dry_run=True → 跳过 Stage 6（CCX 求解），用于调试前置阶段。
-    """
+    dry_run=True 鈫?璺宠繃 Stage 6锛圕CX 姹傝В锛夛紝鐢ㄤ簬璋冭瘯鍓嶇疆闃舵銆?    """
 
     def __init__(
         self,
@@ -69,15 +77,31 @@ class PipelineRunner:
         template_registry: TemplateRegistry | None = None,
         dry_run: bool = False,
         ccx_executable: str | None = None,
+        cad_mode: str = "template",
+        cad_llm_max_attempts: int = 3,
+        mesh_mode: str = "template",
+        mesh_llm_max_attempts: int = 3,
     ) -> None:
         self.runs_dir = Path(runs_dir)
         self.template_registry = template_registry or TemplateRegistry()
         self.dry_run = dry_run
+        if cad_mode not in {"template", "llm"}:
+            raise ValueError(f"Unsupported cad_mode '{cad_mode}'. Expected 'template' or 'llm'.")
+        self.cad_mode = cad_mode
+        if mesh_mode not in {"template", "llm"}:
+            raise ValueError(f"Unsupported mesh_mode '{mesh_mode}'. Expected 'template' or 'llm'.")
+        self.mesh_mode = mesh_mode
 
-        # 初始化所有阶段服务实例（单例，跨 run() 调用复用）
+        # 鍒濆鍖栨墍鏈夐樁娈垫湇鍔″疄渚嬶紙鍗曚緥锛岃法 run() 璋冪敤澶嶇敤锛?
         self._loader        = CaseSpecLoader()
         self._validator     = CaseSpecValidator()
         self._cad_service   = CADService()
+        self._cad_llm_service = CadLLMBuildService(
+            config=CadLLMRepairConfig(max_attempts=max(1, cad_llm_max_attempts))
+        )
+        self._mesh_llm_service = MeshLLMBuildService(
+            config=MeshLLMRepairConfig(max_attempts=max(1, mesh_llm_max_attempts))
+        )
         self._mesh_service  = MeshService()
         self._instantiator  = TemplateInstantiator()
         self._solver_adapter = CalculiXAdapter()
@@ -85,30 +109,28 @@ class PipelineRunner:
         self._postproc       = PostprocessEngine()
 
     def run_from_yaml(self, yaml_path: str | Path) -> PipelineResult:
-        """从 YAML 文件加载 CaseSpec 并运行完整流水线。"""
+        """Load CaseSpec from YAML and run the full pipeline."""
         return self.run(spec=self._loader.from_yaml(yaml_path))
 
     def run_from_json(self, json_path: str | Path) -> PipelineResult:
-        """从 JSON 文件加载 CaseSpec 并运行完整流水线。"""
+        """Load CaseSpec from JSON and run the full pipeline."""
         return self.run(spec=self._loader.from_json(json_path))
 
     def run_from_yaml_with_step(
         self, yaml_path: str | Path, step_path: str | Path
     ) -> PipelineResult:
-        """从 YAML 加载 CaseSpec，并使用外部 STEP 文件（G-02 备轨）。"""
+        """Load YAML CaseSpec and use an external STEP file."""
         return self.run(spec=self._loader.from_yaml(yaml_path), step_file=Path(step_path))
 
     def run_from_json_with_step(
         self, json_path: str | Path, step_path: str | Path
     ) -> PipelineResult:
-        """从 JSON 加载 CaseSpec，并使用外部 STEP 文件（G-02 备轨）。"""
+        """Load JSON CaseSpec and use an external STEP file."""
         return self.run(spec=self._loader.from_json(json_path), step_file=Path(step_path))
 
     def run(self, spec: CaseSpec, step_file: Path | None = None) -> PipelineResult:
-        """执行完整 8 阶段流水线（Stages 0-7）。
-
-        任意阶段抛出异常时，捕获并记录错误，结果标记为失败（success=False）。
-        """
+        """鎵ц瀹屾暣 8 闃舵娴佹按绾匡紙Stages 0-7锛夈€?
+        浠绘剰闃舵鎶涘嚭寮傚父鏃讹紝鎹曡幏骞惰褰曢敊璇紝缁撴灉鏍囪涓哄け璐ワ紙success=False锛夈€?        """
         from datetime import datetime, timezone
 
         t_start = time.perf_counter()
@@ -117,8 +139,8 @@ class PipelineRunner:
         result = PipelineResult(case_id=spec.metadata.case_id, run_dir=run_dir)
 
         try:
-            # Stage 0：输入校验（Layer A 业务规则）
-            logger.info(f"[Pipeline] Stage 0 — Validation (case={spec.metadata.case_id})")
+            # Stage 0锛氳緭鍏ユ牎楠岋紙Layer A 涓氬姟瑙勫垯锛?
+            logger.info(f"[Pipeline] Stage 0 鈥?Validation (case={spec.metadata.case_id})")
             val_result = self._validator.validate(spec)
             if not val_result.passed:
                 raise ValueError(
@@ -126,30 +148,65 @@ class PipelineRunner:
                 )
             self._loader.save(spec, run_dir)
 
-            # Stage 1：模板匹配（G-04）
-            logger.info("[Pipeline] Stage 1 — Template Match")
+            # Stage 1锛氭ā鏉垮尮閰嶏紙G-04锛?
+            logger.info("[Pipeline] Stage 1 鈥?Template Match")
             template = self.template_registry.match(spec)
 
-            # Stage 2：CAD 几何生成（主轨 CadQuery / 备轨外部 STEP）
+            # Stage 2锛欳AD 鍑犱綍鐢熸垚锛堜富杞?CadQuery / 澶囪建澶栭儴 STEP锛?
             logger.info(
-                f"[Pipeline] Stage 2 — {'External STEP' if step_file else 'CAD Service'}"
+                f"[Pipeline] Stage 2 鈥?{'External STEP' if step_file else self.cad_mode}"
             )
-            cad_result = (
-                self._cad_service.build_from_step(step_file, run_dir)
-                if step_file
-                else self._cad_service.build(spec, run_dir)
-            )
+            if step_file:
+                cad_result = self._cad_service.build_from_step(step_file, run_dir)
+            elif self.cad_mode == "llm":
+                llm_outcome = self._cad_llm_service.build(spec=spec, output_dir=run_dir)
+                if not llm_outcome.success or llm_outcome.cad_result is None:
+                    raise RuntimeError(
+                        f"CAD LLM build failed: {llm_outcome.message}. "
+                        f"audit={llm_outcome.audit_path}"
+                    )
+                cad_result = llm_outcome.cad_result
+            else:
+                cad_result = self._cad_service.build(spec, run_dir)
 
-            # Stage 3：网格生成（Gmsh）
-            logger.info("[Pipeline] Stage 3 — Mesh Service")
-            mesh_groups, mesh_quality = self._mesh_service.build(spec, cad_result, run_dir)
+            # V3 CAD Gate锛氭湭閫氳繃瀹℃煡绂佹杩涘叆 mesh 闃舵
+            logger.info("[Pipeline] CAD Gate check before Stage 3")
+            ensure_cad_gate_passed(run_dir)
+
+            # Stage 3锛氱綉鏍肩敓鎴愶紙Gmsh锛?
+            logger.info(
+                f"[Pipeline] Stage 3 鈥?{'mesh_llm' if self.mesh_mode == 'llm' else 'Mesh Service'}"
+            )
+            if self.mesh_mode == "llm":
+                mesh_outcome = self._mesh_llm_service.build(
+                    spec=spec,
+                    cad_result=cad_result,
+                    output_dir=run_dir,
+                )
+                if (
+                    not mesh_outcome.success
+                    or mesh_outcome.mesh_groups is None
+                    or mesh_outcome.mesh_quality is None
+                ):
+                    raise RuntimeError(
+                        f"Mesh LLM build failed: {mesh_outcome.message}. "
+                        f"audit={mesh_outcome.audit_path}"
+                    )
+                mesh_groups = mesh_outcome.mesh_groups
+                mesh_quality = mesh_outcome.mesh_quality
+            else:
+                mesh_groups, mesh_quality = self._mesh_service.build(spec, cad_result, run_dir)
             result.mesh_groups = mesh_groups
             result.mesh_quality = mesh_quality
             if not mesh_quality.overall_pass:
-                logger.warning("[Pipeline] Mesh quality below threshold — continuing anyway")
+                logger.warning("[Pipeline] Mesh quality below threshold 鈥?continuing anyway")
 
-            # Stage 4：分析模型实例化
-            logger.info("[Pipeline] Stage 4 — TemplateInstantiator")
+            # V3 Mesh Gate锛氭湭閫氳繃瀹℃煡绂佹杩涘叆鍚庣画闃舵
+            logger.info("[Pipeline] Mesh Gate check before Stage 4+")
+            ensure_mesh_gate_passed(run_dir)
+
+            # Stage 4锛氬垎鏋愭ā鍨嬪疄渚嬪寲
+            logger.info("[Pipeline] Stage 4 鈥?TemplateInstantiator")
             analysis_model = self._instantiator.instantiate(
                 spec=spec,
                 template=template,
@@ -161,14 +218,14 @@ class PipelineRunner:
                 analysis_model.to_json(), encoding="utf-8"
             )
 
-            # Stage 5：求解器输入生成
-            logger.info("[Pipeline] Stage 5 — CalculiXAdapter")
+            # Stage 5锛氭眰瑙ｅ櫒杈撳叆鐢熸垚
+            logger.info("[Pipeline] Stage 5 鈥?CalculiXAdapter")
             input_files = self._solver_adapter.write_input(analysis_model, mesh_groups, run_dir)
             solver_job = self._solver_adapter.build_solver_job(analysis_model, input_files, run_dir)
 
-            # Stage 6：求解器执行
+            # Stage 6锛氭眰瑙ｅ櫒鎵ц
             if self.dry_run:
-                logger.info("[Pipeline] Stage 6 — Solver (DRY RUN — skipped)")
+                logger.info("[Pipeline] Stage 6 鈥?Solver (DRY RUN 鈥?skipped)")
                 now_utc = datetime.now(timezone.utc)
                 run_status = RunStatus(
                     job_id=solver_job.job_id,
@@ -179,12 +236,12 @@ class PipelineRunner:
                     result_files=[],
                 )
             else:
-                logger.info("[Pipeline] Stage 6 — Solver Execution")
+                logger.info("[Pipeline] Stage 6 鈥?Solver Execution")
                 run_status = self._solver_runner.run(solver_job)
             result.run_status = run_status
 
-            # Stage 7：后处理
-            logger.info("[Pipeline] Stage 7 — PostprocessEngine")
+            # Stage 7锛氬悗澶勭悊
+            logger.info("[Pipeline] Stage 7 鈥?PostprocessEngine")
             summary, manifest, diagnostics = self._postproc.run(
                 run_status, analysis_model, run_dir
             )
@@ -202,17 +259,17 @@ class PipelineRunner:
         self._log_summary(result)
         return result
 
-    def solve_from_run_dir(self, run_dir: str | Path) -> PipelineResult:
-        """从已有 run 目录继续执行 Stage 6（求解）和 Stage 7（后处理）。
+    def solve_from_run_dir(
+        self,
+        run_dir: str | Path,
+        enforce_mesh_gate: bool = True,
+    ) -> PipelineResult:
+        """浠庡凡鏈?run 鐩綍缁х画鎵ц Stage 6锛堟眰瑙ｏ級鍜?Stage 7锛堝悗澶勭悊锛夈€?
+        閫傜敤鍦烘櫙锛?          - 鍓嶆杩愯浣跨敤 --dry-run锛岀幇鍦ㄦ兂瀹為檯鎵ц CalculiX
+          - 鎵嬪姩淇敼浜?job.inp 鍚庨噸鏂版眰瑙?          - 鍙渶瑕侀噸璺戝悗澶勭悊锛坮un_status.json 宸插瓨鍦級
 
-        适用场景：
-          - 前次运行使用 --dry-run，现在想实际执行 CalculiX
-          - 手动修改了 job.inp 后重新求解
-          - 只需要重跑后处理（run_status.json 已存在）
-
-        目录中必须已存在：
-          - solver_job.json     → SolverJob
-          - analysis_model.json → AnalysisModel
+        鐩綍涓繀椤诲凡瀛樺湪锛?          - solver_job.json     鈫?SolverJob
+          - analysis_model.json 鈫?AnalysisModel
         """
         t_start = time.perf_counter()
         run_dir = Path(run_dir).resolve()
@@ -220,7 +277,11 @@ class PipelineRunner:
         result = PipelineResult(case_id=case_id, run_dir=run_dir)
 
         try:
-            # 加载 solver_job.json 与 analysis_model.json
+            # V3 Mesh Gate锛氭湭閫氳繃瀹℃煡绂佹杩涘叆姹傝В闃舵
+            if enforce_mesh_gate:
+                ensure_mesh_gate_passed(run_dir)
+
+            # 鍔犺浇 solver_job.json 涓?analysis_model.json
             job_path = run_dir / "solver_job.json"
             if not job_path.exists():
                 raise FileNotFoundError(
@@ -238,35 +299,34 @@ class PipelineRunner:
             )
             result.analysis_model = analysis_model
 
-            # 加载 mesh_groups.json（后处理可能需要）
+            # 鍔犺浇 mesh_groups.json锛堝悗澶勭悊鍙兘闇€瑕侊級
             mg_path = run_dir / "mesh_groups.json"
             if mg_path.exists():
                 result.mesh_groups = MeshGroups.model_validate_json(
                     mg_path.read_text(encoding="utf-8")
                 )
 
-            # Stage 6：求解器执行（检查已完成状态，避免重复求解）
-            status_path = run_dir / "run_status.json"
+            # Stage 6锛氭眰瑙ｅ櫒鎵ц锛堟鏌ュ凡瀹屾垚鐘舵€侊紝閬垮厤閲嶅姹傝В锛?            status_path = run_dir / "run_status.json"
             if status_path.exists():
                 existing_status = RunStatus.from_json(str(status_path))
                 if existing_status.status == RunStatusEnum.COMPLETED:
                     logger.info(
-                        "[Pipeline] Stage 6 — Solver already completed, skipping."
+                        "[Pipeline] Stage 6 鈥?Solver already completed, skipping."
                     )
                     run_status = existing_status
                 else:
                     logger.info(
-                        f"[Pipeline] Stage 6 — Previous run status: "
+                        f"[Pipeline] Stage 6 鈥?Previous run status: "
                         f"{existing_status.status}. Re-running solver."
                     )
                     run_status = self._solver_runner.run(solver_job)
             else:
-                logger.info("[Pipeline] Stage 6 — Solver Execution")
+                logger.info("[Pipeline] Stage 6 鈥?Solver Execution")
                 run_status = self._solver_runner.run(solver_job)
             result.run_status = run_status
 
-            # Stage 7：后处理
-            logger.info("[Pipeline] Stage 7 — PostprocessEngine")
+            # Stage 7锛氬悗澶勭悊
+            logger.info("[Pipeline] Stage 7 鈥?PostprocessEngine")
             summary, manifest, diagnostics = self._postproc.run(
                 run_status, analysis_model, run_dir
             )
@@ -287,7 +347,7 @@ class PipelineRunner:
     # ------------------------------------------------------------------
 
     def _log_summary(self, result: PipelineResult) -> None:
-        """将流水线运行汇总信息输出到日志。"""
+        """Write pipeline run summary to logs."""
         status = "SUCCESS" if result.success else "FAILED"
         logger.info(
             f"[Pipeline] {status} | case={result.case_id} | "
@@ -301,3 +361,5 @@ class PipelineRunner:
                 logger.info(f"  max_mises_stress = {s.max_mises_stress:.4e} MPa")
             if s.buckling_load_factor is not None:
                 logger.info(f"  buckling_load_factor = {s.buckling_load_factor:.4f}")
+
+

@@ -46,6 +46,12 @@ htmlcov/
 
 # AutoCAE runtime outputs (large, auto-generated)
 autocae_pipeline/runs/
+autocae_pipeline/runs_verify/
+autocae_pipeline/tmp_*/
+
+# Local archives and toolchains
+*.zip
+tools/
 
 # Jupyter
 .ipynb_checkpoints/
