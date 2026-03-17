@@ -161,10 +161,25 @@ class PipelineRunner:
             logger.info("[Pipeline] Stage 1 鈥?Template Match")
             template = self.template_registry.match(spec)
 
+            # V3 检索优先、LLM兜底：模板未命中时自动切换到 LLM 模式
+            effective_cad_mode = self.cad_mode
+            effective_mesh_mode = self.mesh_mode
+            if template is None and not step_file:
+                if self.cad_mode == "template":
+                    logger.warning(
+                        "[Pipeline] No template matched — auto-switching CAD to LLM mode (V3: 未命中再由LLM生成)"
+                    )
+                    effective_cad_mode = "llm"
+                if self.mesh_mode == "template":
+                    logger.warning(
+                        "[Pipeline] No template matched — auto-switching Mesh to LLM mode (V3: 未命中再由LLM生成)"
+                    )
+                    effective_mesh_mode = "llm"
+
             # Stage 2锛欳AD 鍑犱綍鐢熸垚锛堜富杞?CadQuery / 澶囪建澶栭儴 STEP锛?
             failed_stage = "cad"
             logger.info(
-                f"[Pipeline] Stage 2 鈥?{'External STEP' if step_file else self.cad_mode}"
+                f"[Pipeline] Stage 2 鈥?{'External STEP' if step_file else effective_cad_mode}"
             )
             reused_cad = None if step_file is not None else self._try_reuse_confirmed_cad(
                 run_dir=run_dir,
@@ -176,7 +191,7 @@ class PipelineRunner:
             else:
                 if step_file:
                     cad_result = self._cad_service.build_from_step(step_file, run_dir)
-                elif self.cad_mode == "llm":
+                elif effective_cad_mode == "llm":
                     llm_outcome = self._cad_llm_service.build(spec=spec, output_dir=run_dir)
                     if not llm_outcome.success or llm_outcome.cad_result is None:
                         raise RuntimeError(
@@ -195,7 +210,7 @@ class PipelineRunner:
             # Stage 3锛氱綉鏍肩敓鎴愶紙Gmsh锛?
             failed_stage = "mesh"
             logger.info(
-                f"[Pipeline] Stage 3 鈥?{'mesh_llm' if self.mesh_mode == 'llm' else 'Mesh Service'}"
+                f"[Pipeline] Stage 3 鈥?{'mesh_llm' if effective_mesh_mode == 'llm' else 'Mesh Service'}"
             )
             reused_mesh = self._try_reuse_confirmed_mesh(
                 run_dir=run_dir,
@@ -205,7 +220,7 @@ class PipelineRunner:
                 mesh_groups, mesh_quality = reused_mesh
                 logger.info("[Pipeline] Reusing mesh artifacts from confirmed Mesh gate.")
             else:
-                if self.mesh_mode == "llm":
+                if effective_mesh_mode == "llm":
                     mesh_outcome = self._mesh_llm_service.build(
                         spec=spec,
                         cad_result=cad_result,
