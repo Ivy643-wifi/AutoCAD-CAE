@@ -286,6 +286,12 @@ class IntakeService:
             dims.update({k: v for k, v in step_dims.items() if v > 0})
         explicit_dimension_keys = sorted(dims.keys())
 
+        # Separate main dims from extra geometry params (params-first merge support)
+        _MAIN_DIM_KEYS = {"length", "width", "thickness"}
+        extra_dims_from_user: dict[str, float] = {
+            k: v for k, v in dims.items() if k not in _MAIN_DIM_KEYS
+        }
+
         default_dims = _DEFAULT_DIMS[inferred_geometry]
         length = float(dims.get("length", default_dims[0]))
         width = float(dims.get("width", default_dims[1]))
@@ -313,6 +319,7 @@ class IntakeService:
             "width": max(width, 1e-3),
             "thickness": max(thickness, 1e-3),
             "explicit_dimension_keys": explicit_dimension_keys,
+            "extra_dims": extra_dims_from_user,  # user-provided extra geometry params
             "case_name": case_name,
             "normalized_text": text_lower,
             "text_tokens": self._tokenize(text_lower),
@@ -384,6 +391,14 @@ class IntakeService:
             "length": (r"\blength\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", r"\bl\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)"),
             "width": (r"\bwidth\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", r"\bw\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)"),
             "thickness": (r"\bthickness\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", r"\bt\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)"),
+            # extra geometry params (allow template defaults to be overridden by user text)
+            "hole_diameter": (r"\bhole[_\s]?dia(?:meter)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
+            "radius": (r"\bradius\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", r"\br\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)"),
+            "core_thickness": (r"\bcore[_\s]?thickness\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
+            "n_bolts": (r"\bn[_\s]?bolts?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
+            "bolt_diameter": (r"\bbolt[_\s]?dia(?:meter)?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
+            "n_stringers": (r"\bn[_\s]?stringers?\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
+            "stringer_height": (r"\bstringer[_\s]?height\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",),
         }
         for key, regexes in patterns.items():
             for pattern in regexes:
@@ -519,10 +534,13 @@ class IntakeService:
     ) -> CaseSpec:
         geometry = self._build_geometry_from_template(template, normalized)
         topology = _GEOMETRY_TO_TOPOLOGY[template.geometry_type]
+        # User's resolved analysis type takes priority; template.analysis_type is the fallback
+        # (they are always the same when confidence >= threshold, but explicit is clearer)
+        analysis_type = normalized["resolved_analysis_type"]
         return self._assemble_case_spec(
             topology=topology,
             geometry=geometry,
-            analysis_type=template.analysis_type,
+            analysis_type=analysis_type,
             template_id=template.template_id,
             case_name=normalized["case_name"],
             source="template_reuse",
@@ -561,12 +579,14 @@ class IntakeService:
     def _build_generated_case_spec(self, normalized: dict[str, Any]) -> CaseSpec:
         geometry_type: GeometryType = normalized["geometry_type"]
         topology = _GEOMETRY_TO_TOPOLOGY[geometry_type]
+        extra = self._default_extra(geometry_type)
+        extra.update(normalized.get("extra_dims", {}))  # user extra params override defaults
         geometry = Geometry(
             geometry_type=geometry_type,
             length=normalized["length"],
             width=normalized["width"],
             thickness=normalized["thickness"],
-            extra=self._default_extra(geometry_type),
+            extra=extra,
         )
         return self._assemble_case_spec(
             topology=topology,
@@ -598,6 +618,7 @@ class IntakeService:
             if "thickness" in explicit_dims
             else float(template.default_geometry.get("thickness", default_dims[2]))
         )
+        # Build extra: template defaults as base, user-provided extra params override (params-first)
         extra = {
             key: float(value)
             for key, value in template.default_geometry.items()
@@ -605,6 +626,8 @@ class IntakeService:
         }
         if not extra:
             extra = self._default_extra(template.geometry_type)
+        user_extra = normalized.get("extra_dims", {})
+        extra.update(user_extra)  # user wins over template defaults
         return Geometry(
             geometry_type=template.geometry_type,
             length=length,

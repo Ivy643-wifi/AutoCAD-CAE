@@ -408,19 +408,30 @@ class MeshLLMBuildService:
             script_path = attempt_dir / "generated_mesh.py"
             exec_log_path = attempt_dir / "execution.log"
 
-            generated = self.provider.generate_script(
-                spec=spec,
-                cad_result=cad_result,
-                attempt=attempt,
-                previous_script=previous_script,
-                error_context=previous_error,
-                output_dir=output_dir,
-            )
-            script_path.write_text(generated.script_text, encoding="utf-8")
+            generated: GeneratedScript | None = None
+            try:
+                generated = self.provider.generate_script(
+                    spec=spec,
+                    cad_result=cad_result,
+                    attempt=attempt,
+                    previous_script=previous_script,
+                    error_context=previous_error,
+                    output_dir=output_dir,
+                )
+                script_path.write_text(generated.script_text, encoding="utf-8")
 
-            # Keep retries independent: remove only mesh artifacts, keep CAD artifacts untouched.
-            self._clean_mesh_artifacts(output_dir)
-            run_result = self.executor.execute(script_path=script_path, output_dir=output_dir)
+                # Keep retries independent: remove only mesh artifacts, keep CAD artifacts untouched.
+                self._clean_mesh_artifacts(output_dir)
+                run_result = self.executor.execute(script_path=script_path, output_dir=output_dir)
+            except Exception as exc:
+                run_result = ScriptExecutionResult(
+                    success=False,
+                    return_code=-1,
+                    stdout="",
+                    stderr=str(exc),
+                    error_class="runtime_error",
+                    error_message=f"script_provider_error: {exc}",
+                )
             exec_log_path.write_text(
                 f"[stdout]\n{run_result.stdout}\n\n[stderr]\n{run_result.stderr}\n",
                 encoding="utf-8",
@@ -453,7 +464,7 @@ class MeshLLMBuildService:
                 },
                 "script_version": f"v{attempt}",
                 "script_path": str(script_path),
-                "provider_meta": generated.provider_meta,
+                "provider_meta": generated.provider_meta if generated else {"provider_error": True},
                 "execution_log_path": str(exec_log_path),
                 "error_class": run_result.error_class,
                 "error_message": run_result.error_message,
@@ -499,7 +510,7 @@ class MeshLLMBuildService:
                 stop_reason = "repeated_failure_limit"
                 break
 
-            previous_script = generated.script_text
+            previous_script = generated.script_text if generated else None
             previous_error = f"{err_class}: {run_result.error_message}"
 
         self._write_audit(

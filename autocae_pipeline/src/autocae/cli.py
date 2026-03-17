@@ -37,6 +37,7 @@ from autocae.backend.orchestrator.pipeline import PipelineRunner
 from autocae.backend.intake.service import IntakeService
 from autocae.backend.review.cad_gate import CadGateService
 from autocae.backend.review.mesh_gate import MeshGateService
+from autocae.backend.services.doctor_service import DoctorService
 # 模板注册表（list-templates 命令使用）
 from autocae.backend.templates.registry import TemplateRegistry
 
@@ -137,6 +138,39 @@ def _resolve_gate_decision(decision: Optional[str]) -> Literal["confirm", "edit"
         rprint("[yellow]Invalid decision, please enter confirm/edit/abort.[/yellow]")
 
 
+def _resolve_gate_decision_with_label(
+    decision: Optional[str],
+    label: str,
+) -> Literal["confirm", "edit", "abort"]:
+    valid = {"confirm", "edit", "abort"}
+    if decision is not None:
+        norm = decision.strip().lower()
+        if norm in valid:
+            return cast(Literal["confirm", "edit", "abort"], norm)
+        raise ValueError("Invalid decision. Expected one of: confirm, edit, abort.")
+
+    while True:
+        raw = typer.prompt(f"{label} decision [confirm/edit/abort]", default="confirm")
+        norm = raw.strip().lower()
+        if norm in valid:
+            return cast(Literal["confirm", "edit", "abort"], norm)
+        rprint("[yellow]Invalid decision, please enter confirm/edit/abort.[/yellow]")
+
+
+def _render_gate_checks(title: str, checks: list[dict]) -> None:
+    table = Table(title=title, show_header=True)
+    table.add_column("Check")
+    table.add_column("Passed")
+    table.add_column("Message")
+    for check in checks:
+        table.add_row(
+            check.get("name", ""),
+            "yes" if bool(check.get("passed")) else "no",
+            check.get("message", ""),
+        )
+    rprint(table)
+
+
 @preview_app.command("cad")
 def preview_cad(
     run_dir: Path = typer.Argument(
@@ -163,7 +197,7 @@ def preview_cad(
         logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
 
     try:
-        resolved_decision = _resolve_gate_decision(decision)
+        resolved_decision = _resolve_gate_decision_with_label(decision, "CAD")
     except Exception as exc:
         rprint(f"[bold red]CAD gate failed:[/bold red] {exc}")
         raise typer.Exit(code=1)
@@ -181,18 +215,7 @@ def preview_cad(
         rprint(f"[bold red]CAD gate failed:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
-    table = Table(title="CAD Gate Checks", show_header=True)
-    table.add_column("Check")
-    table.add_column("Passed")
-    table.add_column("Message")
-    for check in outcome.checks:
-        table.add_row(
-            check.get("name", ""),
-            "yes" if bool(check.get("passed")) else "no",
-            check.get("message", ""),
-        )
-
-    rprint(table)
+    _render_gate_checks("CAD Gate Checks", outcome.checks)
     rprint(f"decision: [cyan]{outcome.decision}[/cyan]")
     rprint(f"next_stage_allowed: [cyan]{outcome.next_stage_allowed}[/cyan]")
     if outcome.preview_png:
@@ -227,7 +250,7 @@ def preview_mesh(
         logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
 
     try:
-        resolved_decision = _resolve_gate_decision(decision)
+        resolved_decision = _resolve_gate_decision_with_label(decision, "Mesh")
     except Exception as exc:
         rprint(f"[bold red]Mesh gate failed:[/bold red] {exc}")
         raise typer.Exit(code=1)
@@ -245,24 +268,119 @@ def preview_mesh(
         rprint(f"[bold red]Mesh gate failed:[/bold red] {exc}")
         raise typer.Exit(code=1)
 
-    table = Table(title="Mesh Gate Checks", show_header=True)
-    table.add_column("Check")
-    table.add_column("Passed")
-    table.add_column("Message")
-    for check in outcome.checks:
-        table.add_row(
-            check.get("name", ""),
-            "yes" if bool(check.get("passed")) else "no",
-            check.get("message", ""),
-        )
-
-    rprint(table)
+    _render_gate_checks("Mesh Gate Checks", outcome.checks)
     rprint(f"decision: [cyan]{outcome.decision}[/cyan]")
     rprint(f"next_stage_allowed: [cyan]{outcome.next_stage_allowed}[/cyan]")
     if outcome.preview_png:
         rprint(f"preview_png: {outcome.preview_png}")
     if outcome.transcript_path:
         rprint(f"review_transcript: {outcome.transcript_path}")
+
+
+@app.command()
+def review(
+    run_dir: Path = typer.Argument(
+        ...,
+        help="run directory path (runs/<case_id>/)",
+    ),
+    stage: str = typer.Option(
+        "all",
+        "--stage",
+        help="Review stage scope: cad | mesh | all",
+    ),
+    cad_decision: Optional[str] = typer.Option(
+        None,
+        "--cad-decision",
+        help="CAD gate decision: confirm|edit|abort. Omit for prompt.",
+    ),
+    cad_comment: str = typer.Option("", "--cad-comment", help="CAD gate comment (optional)."),
+    cad_edit_request: str = typer.Option(
+        "",
+        "--cad-edit-request",
+        help="CAD edit request content when decision=edit.",
+    ),
+    mesh_decision: Optional[str] = typer.Option(
+        None,
+        "--mesh-decision",
+        help="Mesh gate decision: confirm|edit|abort. Omit for prompt.",
+    ),
+    mesh_comment: str = typer.Option("", "--mesh-comment", help="Mesh gate comment (optional)."),
+    mesh_edit_request: str = typer.Option(
+        "",
+        "--mesh-edit-request",
+        help="Mesh edit request content when decision=edit.",
+    ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Open interactive preview window instead of offscreen screenshot only.",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """Unified stage review flow: auto_check -> preview -> confirm/edit/abort."""
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    stage_norm = stage.strip().lower()
+    if stage_norm not in {"cad", "mesh", "all"}:
+        rprint("[bold red]Review failed:[/bold red] --stage must be one of cad|mesh|all")
+        raise typer.Exit(code=1)
+
+    run_dir = run_dir.resolve()
+    cad_outcome = None
+
+    if stage_norm in {"cad", "all"}:
+        try:
+            resolved_cad_decision = _resolve_gate_decision_with_label(cad_decision, "CAD")
+            cad_outcome = CadGateService().run_gate(
+                run_dir=run_dir,
+                decision=resolved_cad_decision,
+                comment=cad_comment,
+                edit_request=cad_edit_request,
+                interactive_preview=interactive,
+            )
+        except Exception as exc:
+            rprint(f"[bold red]CAD review failed:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+        _render_gate_checks("CAD Gate Checks", cad_outcome.checks)
+        rprint(f"cad.decision: [cyan]{cad_outcome.decision}[/cyan]")
+        rprint(f"cad.next_stage_allowed: [cyan]{cad_outcome.next_stage_allowed}[/cyan]")
+        if cad_outcome.preview_png:
+            rprint(f"cad.preview_png: {cad_outcome.preview_png}")
+        if cad_outcome.transcript_path:
+            rprint(f"review_transcript: {cad_outcome.transcript_path}")
+
+    can_review_mesh = stage_norm == "mesh" or (
+        stage_norm == "all" and cad_outcome is not None and cad_outcome.next_stage_allowed
+    )
+    if can_review_mesh:
+        try:
+            resolved_mesh_decision = _resolve_gate_decision_with_label(mesh_decision, "Mesh")
+            mesh_outcome = MeshGateService().run_gate(
+                run_dir=run_dir,
+                decision=resolved_mesh_decision,
+                comment=mesh_comment,
+                edit_request=mesh_edit_request,
+                interactive_preview=interactive,
+            )
+        except Exception as exc:
+            rprint(f"[bold red]Mesh review failed:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+
+        _render_gate_checks("Mesh Gate Checks", mesh_outcome.checks)
+        rprint(f"mesh.decision: [cyan]{mesh_outcome.decision}[/cyan]")
+        rprint(f"mesh.next_stage_allowed: [cyan]{mesh_outcome.next_stage_allowed}[/cyan]")
+        if mesh_outcome.preview_png:
+            rprint(f"mesh.preview_png: {mesh_outcome.preview_png}")
+        if mesh_outcome.transcript_path:
+            rprint(f"review_transcript: {mesh_outcome.transcript_path}")
+    elif stage_norm == "all":
+        rprint(
+            "[yellow]Mesh review skipped:[/yellow] CAD gate is not passed; "
+            "confirm CAD first to continue to mesh gate."
+        )
 
 
 @app.command()
@@ -440,6 +558,66 @@ def validate(
     except Exception as exc:
         # 文件读取失败或 Pydantic 解析失败（格式错误）
         rprint(f"[red]Error loading case file:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def doctor(
+    project_root: Path = typer.Option(
+        Path("."),
+        "--project-root",
+        help="Project root used for doctor checks.",
+    ),
+    runs_dir: Path = typer.Option(
+        Path("runs"),
+        "--runs-dir",
+        help="Runs directory to test write permission and index storage.",
+    ),
+    manifest: Optional[Path] = typer.Option(
+        None,
+        "--manifest",
+        help="Path to tools/manifest.yaml (optional, auto-resolve when omitted).",
+    ),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+) -> None:
+    """Environment preflight checks (dependencies, CCX, write permissions, encoding, sha256)."""
+    if not verbose:
+        logger.remove()
+        logger.add(lambda msg: rprint(f"[dim]{msg}[/dim]"), level="INFO")
+
+    service = DoctorService()
+    report = service.run(
+        project_root=project_root,
+        runs_dir=runs_dir,
+        manifest_path=manifest,
+    )
+
+    table = Table(title="AutoCAE Doctor Checks", show_header=True)
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Message")
+    table.add_column("Remediation")
+    for c in report.checks:
+        status_color = {
+            "pass": "green",
+            "warn": "yellow",
+            "fail": "red",
+        }.get(c.status, "white")
+        table.add_row(
+            c.name,
+            f"[{status_color}]{c.status}[/{status_color}]",
+            c.message,
+            c.remediation,
+        )
+
+    rprint(table)
+    rprint(f"project_root: {report.project_root}")
+    rprint(f"runs_dir: {report.runs_dir}")
+    if report.manifest_path is not None:
+        rprint(f"manifest: {report.manifest_path}")
+    rprint(f"doctor_summary: [cyan]{report.summary_status}[/cyan]")
+
+    if report.has_failures:
         raise typer.Exit(code=1)
 
 

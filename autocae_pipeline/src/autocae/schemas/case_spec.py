@@ -283,6 +283,17 @@ class CaseSpecMetadata(BaseModel):
     status: str = "draft"                        # 状态：draft / validated / approved
     template_id: str | None = None               # 若来自模板，记录模板 ID
     notes: str = ""
+    # M2.3: 检索亲和度与来源模板链接
+    template_affinity: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="检索匹配相似度（0~1，由 IntakeService/TemplateRegistry 写入，参与检索排序）",
+    )
+    template_link: str | None = Field(
+        default=None,
+        description="来源模板 ID 或路径（用于追溯、推荐和 promote 流程）",
+    )
 
 
 # ---------------------------------------------------------------------------

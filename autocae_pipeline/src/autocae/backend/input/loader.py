@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ class CaseSpecLoader:
         p = Path(path)
         logger.info(f"Loading CaseSpec from YAML: {p}")
         raw: dict[str, Any] = yaml.safe_load(p.read_text(encoding="utf-8"))
+        self._inject_stable_case_id_if_missing(raw=raw, source_path=p)
         spec = CaseSpec.model_validate(raw)
         logger.info(f"CaseSpec '{spec.metadata.case_name}' loaded (id={spec.metadata.case_id})")
         return spec
@@ -45,7 +47,10 @@ class CaseSpecLoader:
         """从 JSON 文件加载 CaseSpec。"""
         p = Path(path)
         logger.info(f"Loading CaseSpec from JSON: {p}")
-        spec = CaseSpec.model_validate_json(p.read_text(encoding="utf-8"))
+        raw_text = p.read_text(encoding="utf-8")
+        raw: dict[str, Any] = json.loads(raw_text)
+        self._inject_stable_case_id_if_missing(raw=raw, source_path=p)
+        spec = CaseSpec.model_validate(raw)
         logger.info(f"CaseSpec '{spec.metadata.case_name}' loaded (id={spec.metadata.case_id})")
         return spec
 
@@ -56,6 +61,19 @@ class CaseSpecLoader:
         out.write_text(spec.to_json(), encoding="utf-8")
         logger.info(f"CaseSpec saved → {out}")
         return out
+
+    @staticmethod
+    def _inject_stable_case_id_if_missing(*, raw: dict[str, Any], source_path: Path) -> None:
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            raw["metadata"] = metadata
+        case_id = metadata.get("case_id")
+        if isinstance(case_id, str) and case_id.strip():
+            return
+
+        digest = hashlib.sha1(str(source_path.resolve()).encode("utf-8")).hexdigest()[:8]
+        metadata["case_id"] = f"case_{digest}"
 
 
 # Backward-compatible alias (was CaseSpecBuilder)

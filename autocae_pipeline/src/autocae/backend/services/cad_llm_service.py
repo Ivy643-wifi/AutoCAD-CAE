@@ -1,4 +1,7 @@
-"""LLM-driven CAD script generation with bounded auto-repair (M1.4)."""
+"""LLM-driven CAD script generation with bounded auto-repair (M1.4).
+
+M2.4: 使用共享修复策略模型（schemas.repair_strategy）。
+"""
 
 from __future__ import annotations
 
@@ -19,26 +22,17 @@ from loguru import logger
 from autocae.backend.templates.cad.base import CADResult
 from autocae.schemas.case_spec import CaseSpec, GeometryType
 from autocae.schemas.mesh import GeometryMeta
+from autocae.schemas.repair_strategy import (
+    RepairConfig,
+    build_issue_report,
+    classify_failure,
+    extract_error_message,
+    root_cause_hint,
+    remediation_hint,
+)
 
-
-@dataclass
-class CadLLMRepairConfig:
-    """Bounded retry controls required by V3."""
-
-    max_attempts: int = 3
-    failure_class_filter: tuple[str, ...] = (
-        "syntax_error",
-        "import_error",
-        "runtime_error",
-        "export_missing",
-    )
-    stop_conditions: tuple[str, ...] = (
-        "success",
-        "max_attempts_reached",
-        "failure_class_not_allowed",
-        "repeated_failure_limit",
-    )
-    repeated_failure_limit: int = 2
+# M2.4: CadLLMRepairConfig 是 RepairConfig 的类型别名，保持向后兼容
+CadLLMRepairConfig = RepairConfig
 
 
 @dataclass
@@ -424,16 +418,26 @@ class CadLLMBuildService:
             script_path = attempt_dir / "generated_cad.py"
             exec_log_path = attempt_dir / "execution.log"
 
-            generated = self.provider.generate_script(
-                spec=spec,
-                attempt=attempt,
-                previous_script=previous_script,
-                error_context=previous_error,
-                output_dir=output_dir,
-            )
-            script_path.write_text(generated.script_text, encoding="utf-8")
-
-            run_result = self.executor.execute(script_path=script_path, output_dir=output_dir)
+            generated: GeneratedScript | None = None
+            try:
+                generated = self.provider.generate_script(
+                    spec=spec,
+                    attempt=attempt,
+                    previous_script=previous_script,
+                    error_context=previous_error,
+                    output_dir=output_dir,
+                )
+                script_path.write_text(generated.script_text, encoding="utf-8")
+                run_result = self.executor.execute(script_path=script_path, output_dir=output_dir)
+            except Exception as exc:
+                run_result = ScriptExecutionResult(
+                    success=False,
+                    return_code=-1,
+                    stdout="",
+                    stderr=str(exc),
+                    error_class="runtime_error",
+                    error_message=f"script_provider_error: {exc}",
+                )
             exec_log_path.write_text(
                 f"[stdout]\n{run_result.stdout}\n\n[stderr]\n{run_result.stderr}\n",
                 encoding="utf-8",
@@ -466,7 +470,7 @@ class CadLLMBuildService:
                 "input_summary": attempt_input_summary,
                 "script_version": f"v{attempt}",
                 "script_path": str(script_path),
-                "provider_meta": generated.provider_meta,
+                "provider_meta": generated.provider_meta if generated else {"provider_error": True},
                 "execution_log_path": str(exec_log_path),
                 "error_class": run_result.error_class,
                 "error_message": run_result.error_message,
@@ -513,7 +517,7 @@ class CadLLMBuildService:
                 stop_reason = "repeated_failure_limit"
                 break
 
-            previous_script = generated.script_text
+            previous_script = generated.script_text if generated else None
             previous_error = f"{err_class}: {run_result.error_message}"
 
         audit = self._write_audit(
@@ -583,17 +587,12 @@ class CadLLMBuildService:
         stop_reason: str,
         attempts: list[dict[str, Any]],
     ) -> Path:
-        last = attempts[-1] if attempts else {}
-        err_class = str(last.get("error_class", "runtime_error"))
-        err_msg = str(last.get("error_message", "unknown error"))
-        report = {
-            "error_stage": "cad_llm",
-            "error_class": err_class,
-            "error_message": err_msg,
-            "root_cause_hint": root_cause_hint(err_class),
-            "remediation_hint": remediation_hint(err_class, stop_reason),
-            "stop_reason": stop_reason,
-        }
+        # M2.4: 使用共享 build_issue_report，结构统一
+        report = build_issue_report(
+            stage="cad_llm",
+            stop_reason=stop_reason,
+            attempts=attempts,
+        )
         issue_path = output_dir / "cad_llm_issue_report.json"
         issue_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return issue_path

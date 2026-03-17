@@ -11,6 +11,7 @@ from typing import Any, Literal
 from loguru import logger
 
 from autocae.backend.input.validator import DiagnosticsValidator
+from autocae.backend.orchestrator.artifact_locator import ArtifactLocator
 from autocae.backend.services.visualization_service import VisualizationService
 
 GateDecision = Literal["confirm", "edit", "abort"]
@@ -53,17 +54,10 @@ class MeshGateService:
         interactive_preview: bool = False,
     ) -> MeshGateOutcome:
         run_dir = Path(run_dir).resolve()
-        mesh_file = self._resolve_artifact(run_dir, ["mesh.inp", "03_mesh/mesh.inp"])
-        mesh_groups_file = self._resolve_artifact(
-            run_dir,
-            ["mesh_groups.json", "03_mesh/mesh_groups.json"],
-            required=False,
-        )
-        mesh_quality_file = self._resolve_artifact(
-            run_dir,
-            ["mesh_quality_report.json", "03_mesh/mesh_quality_report.json"],
-            required=False,
-        )
+        locator = ArtifactLocator(run_dir)
+        mesh_file = locator.resolve("mesh_inp", required=True)
+        mesh_groups_file = locator.resolve("mesh_groups", required=False)
+        mesh_quality_file = locator.resolve("mesh_quality", required=False)
 
         checks = self._run_auto_checks(
             mesh_file=mesh_file,
@@ -267,21 +261,6 @@ class MeshGateService:
             },
         )
 
-    @staticmethod
-    def _resolve_artifact(
-        run_dir: Path,
-        candidates: list[str],
-        required: bool = True,
-    ) -> Path | None:
-        for rel in candidates:
-            p = run_dir / rel
-            if p.exists():
-                return p
-        if required:
-            joined = ", ".join(candidates)
-            raise FileNotFoundError(f"Required mesh artifact not found under {run_dir}: {joined}")
-        return None
-
     def _append_transcript(
         self,
         *,
@@ -300,7 +279,7 @@ class MeshGateService:
         payload = {"version": "v1", "records": []}
         if transcript_path.exists():
             try:
-                payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+                payload = json.loads(transcript_path.read_text(encoding="utf-8-sig"))
             except Exception:
                 payload = {"version": "v1", "records": []}
         if not isinstance(payload.get("records"), list):

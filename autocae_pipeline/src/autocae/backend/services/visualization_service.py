@@ -44,6 +44,8 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
+from autocae.backend.orchestrator.artifact_locator import ArtifactLocator
+
 
 # ---------------------------------------------------------------------------
 # 颜色映射：命名面 → RGB（用于 CAD 可视化）
@@ -839,6 +841,7 @@ class VisualizationService:
         返回 {"cad": ..., "mesh": ..., "results_displacement": ..., "results_stress": ...}。
         """
         run_dir = Path(run_dir)
+        locator = ArtifactLocator(run_dir)
         results: dict[str, Path | None] = {
             "cad": None,
             "mesh": None,
@@ -847,12 +850,12 @@ class VisualizationService:
         }
 
         # ── Stage 2 输出：model.step ──────────────────────────────────────
-        step_file = run_dir / "model.step"
-        geo_meta_file = run_dir / "geometry_meta.json"
+        step_file = locator.resolve("step", required=False)
+        geo_meta_file = locator.resolve("geometry_meta", required=False)
 
-        if step_file.exists():
+        if step_file is not None and step_file.exists():
             bbox: dict[str, float] = {}
-            if geo_meta_file.exists():
+            if geo_meta_file is not None and geo_meta_file.exists():
                 meta = json.loads(geo_meta_file.read_text(encoding="utf-8"))
                 bbox = meta.get("bounding_box") or {}
             try:
@@ -869,14 +872,14 @@ class VisualizationService:
             logger.warning(f"model.step not found in {run_dir} — skipping CAD visualization")
 
         # ── Stage 3 输出：mesh.inp ────────────────────────────────────────
-        mesh_file = run_dir / "mesh.inp"
-        groups_file = run_dir / "mesh_groups.json"
+        mesh_file = locator.resolve("mesh_inp", required=False)
+        groups_file = locator.resolve("mesh_groups", required=False)
 
-        if mesh_file.exists():
+        if mesh_file is not None and mesh_file.exists():
             try:
                 results["mesh"] = self.visualize_mesh(
                     mesh_inp_file=mesh_file,
-                    groups_json=groups_file if groups_file.exists() else None,
+                    groups_json=groups_file if groups_file is not None and groups_file.exists() else None,
                     output_dir=run_dir,
                     interactive=interactive,
                     save_png=save_png,
@@ -887,8 +890,13 @@ class VisualizationService:
             logger.warning(f"mesh.inp not found in {run_dir} — skipping mesh visualization")
 
         # ── Stage 6/7 输出：job.frd（CalculiX 结果场）────────────────────
-        frd_file = run_dir / "job.frd"
-        if frd_file.exists() and mesh_file.exists():
+        frd_file = locator.resolve("job_frd", required=False)
+        if (
+            frd_file is not None
+            and frd_file.exists()
+            and mesh_file is not None
+            and mesh_file.exists()
+        ):
             try:
                 res = self._results_viz.visualize(
                     frd_file=frd_file,

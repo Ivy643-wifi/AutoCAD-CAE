@@ -11,6 +11,7 @@ from typing import Any, Literal
 from loguru import logger
 
 from autocae.backend.input.validator import DiagnosticsValidator
+from autocae.backend.orchestrator.artifact_locator import ArtifactLocator
 from autocae.backend.services.visualization_service import VisualizationService
 
 GateDecision = Literal["confirm", "edit", "abort"]
@@ -52,12 +53,9 @@ class CadGateService:
         interactive_preview: bool = False,
     ) -> CadGateOutcome:
         run_dir = Path(run_dir).resolve()
-        step_file = self._resolve_artifact(run_dir, ["model.step", "02_cad/model.step"])
-        geometry_meta_file = self._resolve_artifact(
-            run_dir,
-            ["geometry_meta.json", "02_cad/geometry_meta.json"],
-            required=False,
-        )
+        locator = ArtifactLocator(run_dir)
+        step_file = locator.resolve("step", required=True)
+        geometry_meta_file = locator.resolve("geometry_meta", required=False)
 
         checks = self._run_auto_checks(step_file=step_file, geometry_meta_file=geometry_meta_file)
         auto_check_passed = all(c["passed"] for c in checks)
@@ -243,21 +241,6 @@ class CadGateService:
             },
         )
 
-    @staticmethod
-    def _resolve_artifact(
-        run_dir: Path,
-        candidates: list[str],
-        required: bool = True,
-    ) -> Path | None:
-        for rel in candidates:
-            p = run_dir / rel
-            if p.exists():
-                return p
-        if required:
-            joined = ", ".join(candidates)
-            raise FileNotFoundError(f"Required CAD artifact not found under {run_dir}: {joined}")
-        return None
-
     def _append_transcript(
         self,
         *,
@@ -275,7 +258,7 @@ class CadGateService:
         payload = {"version": "v1", "records": []}
         if transcript_path.exists():
             try:
-                payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+                payload = json.loads(transcript_path.read_text(encoding="utf-8-sig"))
             except Exception:
                 payload = {"version": "v1", "records": []}
         if not isinstance(payload.get("records"), list):
