@@ -19,26 +19,15 @@ from loguru import logger
 from autocae.backend.templates.cad.base import CADResult
 from autocae.schemas.case_spec import CaseSpec
 from autocae.schemas.mesh import MeshGroups, MeshQualityReport
+from autocae.schemas.repair_strategy import (
+    RepairConfig,
+    build_issue_report,
+    classify_failure,
+    extract_error_message,
+)
 
-
-@dataclass
-class MeshLLMRepairConfig:
-    """Bounded retry controls required by V3."""
-
-    max_attempts: int = 3
-    failure_class_filter: tuple[str, ...] = (
-        "syntax_error",
-        "import_error",
-        "runtime_error",
-        "export_missing",
-    )
-    stop_conditions: tuple[str, ...] = (
-        "success",
-        "max_attempts_reached",
-        "failure_class_not_allowed",
-        "repeated_failure_limit",
-    )
-    repeated_failure_limit: int = 2
+# M2.4: MeshLLMRepairConfig 是 RepairConfig 的类型别名，保持向后兼容
+MeshLLMRepairConfig = RepairConfig
 
 
 @dataclass
@@ -588,62 +577,16 @@ class MeshLLMBuildService:
         stop_reason: str,
         attempts: list[dict[str, Any]],
     ) -> Path:
-        last = attempts[-1] if attempts else {}
-        err_class = str(last.get("error_class", "runtime_error"))
-        err_msg = str(last.get("error_message", "unknown error"))
-        report = {
-            "error_stage": "mesh_llm",
-            "error_class": err_class,
-            "error_message": err_msg,
-            "root_cause_hint": root_cause_hint(err_class),
-            "remediation_hint": remediation_hint(err_class, stop_reason),
-            "stop_reason": stop_reason,
-        }
+        # M2.4: 使用共享 build_issue_report，结构统一
+        report = build_issue_report(
+            stage="mesh_llm",
+            stop_reason=stop_reason,
+            attempts=attempts,
+        )
         issue_path = output_dir / "mesh_llm_issue_report.json"
         issue_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return issue_path
 
 
-def classify_failure(log_text: str) -> str:
-    text = log_text.lower()
-    if "syntaxerror" in text:
-        return "syntax_error"
-    if "modulenotfounderror" in text or "importerror" in text:
-        return "import_error"
-    if "filenotfounderror" in text:
-        return "file_not_found"
-    return "runtime_error"
-
-
-def extract_error_message(log_text: str) -> str:
-    lines = [ln.strip() for ln in log_text.splitlines() if ln.strip()]
-    if not lines:
-        return "unknown runtime error"
-    return lines[-1][:300]
-
-
-def root_cause_hint(error_class: str) -> str:
-    mapping = {
-        "syntax_error": "Generated script has Python syntax issues.",
-        "import_error": "Runtime environment is missing required Python modules.",
-        "export_missing": "Script did not write required mesh artifacts.",
-        "file_not_found": "Expected file path in script is invalid.",
-        "runtime_error": "Script execution failed with runtime exception.",
-    }
-    return mapping.get(error_class, "Unknown mesh script failure.")
-
-
-def remediation_hint(error_class: str, stop_reason: str) -> str:
-    if stop_reason == "failure_class_not_allowed":
-        return "Error class is out of repair scope; manual intervention required."
-    if stop_reason == "repeated_failure_limit":
-        return "Same failure repeated. Inspect audit log and refine prompt/constraints."
-
-    mapping = {
-        "syntax_error": "Fix script syntax and re-run with bounded retry.",
-        "import_error": "Install missing dependency (gmsh) and re-run.",
-        "export_missing": "Ensure script writes mesh.inp, mesh_groups.json, mesh_quality_report.json.",
-        "file_not_found": "Check output path handling and file permissions.",
-        "runtime_error": "Inspect execution log, then regenerate script with error context.",
-    }
-    return mapping.get(error_class, "Inspect mesh_llm_repair_audit.json for details.")
+# M2.4: classify_failure, extract_error_message 由 autocae.schemas.repair_strategy 统一提供，
+# 已在文件顶部导入，此处不重复定义。

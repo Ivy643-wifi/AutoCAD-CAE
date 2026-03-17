@@ -598,46 +598,5 @@ class CadLLMBuildService:
         return issue_path
 
 
-def classify_failure(log_text: str) -> str:
-    text = log_text.lower()
-    if "syntaxerror" in text:
-        return "syntax_error"
-    if "modulenotfounderror" in text or "importerror" in text:
-        return "import_error"
-    if "filenotfounderror" in text:
-        return "file_not_found"
-    return "runtime_error"
-
-
-def extract_error_message(log_text: str) -> str:
-    lines = [ln.strip() for ln in log_text.splitlines() if ln.strip()]
-    if not lines:
-        return "unknown runtime error"
-    return lines[-1][:300]
-
-
-def root_cause_hint(error_class: str) -> str:
-    mapping = {
-        "syntax_error": "Generated script has Python syntax issues.",
-        "import_error": "Runtime environment is missing required Python modules.",
-        "export_missing": "Script did not write required CAD artifacts.",
-        "file_not_found": "Expected file path in script is invalid.",
-        "runtime_error": "Script execution failed with runtime exception.",
-    }
-    return mapping.get(error_class, "Unknown CAD script failure.")
-
-
-def remediation_hint(error_class: str, stop_reason: str) -> str:
-    if stop_reason == "failure_class_not_allowed":
-        return "Error class is out of repair scope; manual intervention required."
-    if stop_reason == "repeated_failure_limit":
-        return "Same failure repeated. Inspect audit log and refine prompt/constraints."
-
-    mapping = {
-        "syntax_error": "Fix script syntax and re-run with bounded retry.",
-        "import_error": "Install missing dependency (cadquery) and re-run.",
-        "export_missing": "Ensure script writes model.step and geometry_meta.json.",
-        "file_not_found": "Check output path handling and file permissions.",
-        "runtime_error": "Inspect execution log, then regenerate script with error context.",
-    }
-    return mapping.get(error_class, "Inspect cad_llm_repair_audit.json for details.")
+# M2.4: classify_failure, extract_error_message, root_cause_hint, remediation_hint
+# 由 autocae.schemas.repair_strategy 统一提供，已在文件顶部导入，此处不重复定义。

@@ -175,6 +175,15 @@ def classify_failure(log_text: str) -> str:
         return ErrorClass.FILE_NOT_FOUND
     if "geometryexception" in text or "shape is null" in text or "invalid geometry" in text:
         return ErrorClass.GEOMETRIC_INVALID
+    # 网格质量不达标：来自 mesh_quality_report.json 写入失败或脚本主动报告质量问题
+    if (
+        "quality below" in text
+        or "quality_below_threshold" in text
+        or "mesh quality" in text and "fail" in text
+        or "skewness" in text and "exceed" in text
+        or "aspect ratio" in text and "exceed" in text
+    ):
+        return ErrorClass.QUALITY_BELOW_THRESHOLD
     return ErrorClass.RUNTIME_ERROR
 
 
